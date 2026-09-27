@@ -35,6 +35,8 @@
       const scene = new THREE.Scene();
       const clock = new THREE.Clock();
 
+      let mixer = null;
+
       const windUniforms = {
         uTime: { value: 0 },
         uStrength: { value: 0.065 },
@@ -143,6 +145,12 @@
           glbUrl,
           (gltf) => {
             const model = gltf.scene;
+
+            mixer = new THREE.AnimationMixer(model);
+
+            gltf.animations.forEach((clip) => {
+              mixer.clipAction(clip).play();
+            });
 
             // 3. วนลูปตั้งค่าให้ทุก Object รองรับการรับ-ทอดเงา และแก้ Color Space
             model.traverse((child) => {
@@ -360,7 +368,13 @@
       function animate() {
         requestAnimationFrame(animate);
 
-        windUniforms.uTime.value = clock.getElapsedTime();
+        const delta = Math.min(clock.getDelta(), 0.05);
+        windUniforms.uTime.value += delta;
+
+        if (mixer) {
+          mixer.update(delta);
+        }
+
         if (picked_object !== null) {
           camera.position.lerp(zoomPosition, 0.05);
           controls.target.lerp(zoomTarget, 0.05);
