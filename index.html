@@ -33,6 +33,13 @@
       document.body.appendChild(renderer.domElement);
 
       const scene = new THREE.Scene();
+      const clock = new THREE.Clock();
+
+      const windUniforms = {
+        uTime: { value: 0 },
+        uStrength: { value: 0.065 },
+      };
+
       scene.background = new THREE.Color(0x222222);
 
       const camera = new THREE.PerspectiveCamera(
@@ -44,6 +51,68 @@
       camera.position.set(0, 0, 10);
 
       const controls = new THREE.OrbitControls(camera, renderer.domElement);
+
+      const raycaster = new THREE.Raycaster();
+      const pointer = new THREE.Vector2();
+
+      let picked_object = null;
+
+      const zoomPosition = new THREE.Vector3();
+      const zoomTarget = new THREE.Vector3();
+
+      renderer.domElement.addEventListener("click", onPick);
+
+      function onPick(e) {
+        const rect = renderer.domElement.getBoundingClientRect();
+
+        pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+        raycaster.setFromCamera(pointer, camera);
+
+        const hit = raycaster.intersectObjects(scene.children, true)[0];
+
+        // คลิกที่ว่างหรือวัตถุอื่น ไม่ต้องซูม
+        if (!hit) return;
+
+        const name = hit.object.name;
+        if (name.startsWith("PF_Profile_")) {
+          picked_object = scene.getObjectByName("PF_Profile_Inset");
+        } else if (
+          name === "PF_Photo_Replace_With_Your_Texture" ||
+          name === "PF_Portrait_Frame" ||
+          name === "PF_Portrait_Caption"
+        ) {
+          picked_object = scene.getObjectByName(
+            "PF_Photo_Replace_With_Your_Texture",
+          );
+        } else {
+          return;
+        }
+        if (!picked_object) return;
+
+        // หาจุดกลางป้ายในฉาก
+        const box = new THREE.Box3().setFromObject(picked_object);
+        box.getCenter(zoomTarget);
+
+        // คำนวณระยะให้มองเห็นป้ายเต็มใบ
+        const size = box.getSize(new THREE.Vector3());
+        const halfFov = THREE.MathUtils.degToRad(camera.fov / 2);
+
+        const distance =
+          Math.max(
+            size.y / (2 * Math.tan(halfFov)),
+            size.x / (2 * Math.tan(halfFov) * camera.aspect),
+          ) * 1.5;
+
+        zoomPosition.copy(zoomTarget);
+        zoomPosition.z += distance;
+      }
+
+      // เมื่อเริ่มควบคุมกล้องเอง ให้หยุดซูมอัตโนมัติ
+      controls.addEventListener("start", () => {
+        picked_object = null;
+      });
 
       // 2. ปรับปรุงระบบแสง (Lighting)
       // ลด AmbientLight เพื่อไม่ให้แสงซัดจนภาพขาวโพน (จากเดิม 2.0 เหลือ 0.5)
@@ -68,7 +137,7 @@
         const gltfLoader = new THREE.GLTFLoader();
         gltfLoader.setMeshoptDecoder(MeshoptDecoder);
 
-        const glbUrl = "https://chanamor.github.io/comgraph/RamenGtt.glb";
+        const glbUrl = "./ramen.glb";
 
         gltfLoader.load(
           glbUrl,
@@ -81,12 +150,148 @@
                 child.castShadow = true;
                 child.receiveShadow = true;
 
-                // แก้ปัญหาสีและรูปภาพขาวเว่อร์
-                if (child.material) {
-                  child.material.needsUpdate = true;
-                  if (child.material.map) {
-                    child.material.map.encoding = THREE.sRGBEncoding;
+                if (child.name == "Ramen_Bowl") {
+                  child.material = new THREE.ShaderMaterial({
+                    uniforms: {
+                      uColor: {
+                        value: new THREE.Color(0xe65b3a).convertSRGBToLinear(),
+                      },
+                      uLightDir: {
+                        value: dirLight1.position.clone().normalize(),
+                      },
+                    },
+                    vertexShader: `
+                                uniform vec3 uLightDir;
+
+                                varying vec3 vNormal;
+                                varying vec3 vPos;
+                                varying vec3 vLightDir;
+
+                                void main() {
+                                vec4 pos = modelViewMatrix * vec4(position, 1.0);
+
+                                vPos = pos.xyz;
+                                vNormal = normalize(normalMatrix * normal);
+                                vLightDir = mat3(viewMatrix) * uLightDir;
+
+                                gl_Position = projectionMatrix * pos;
+                                }
+
+                                `,
+                    fragmentShader: `
+                  uniform vec3 uColor;
+
+                  varying vec3 vNormal;
+                  varying vec3 vPos;
+                  varying vec3 vLightDir;
+
+                  void main() {
+                    vec3 N = normalize(vNormal);
+                    vec3 L = normalize(vLightDir);
+                    vec3 V = normalize(-vPos);
+
+                    // แบ่งความสว่างเป็นขั้น ตามสูตรในสไลด์
+                    float diffuse = max(dot(N, L), 0.0);
+                    float levels = 2.0;
+                    diffuse = floor(diffuse * levels) / levels;
+                    diffuse += 0.6;
+
+                    // แสงสะท้อน
+                    vec3 R = reflect(-L, N);
+                    float specular = pow(max(dot(R, V), 0.0), 4.0);
+
+                    specular = smoothstep(0.4, 0.6, specular);
+                    if (diffuse <= 0.6) specular = 0.0;
+
+                    // ชามใช้สีล้วน จึงใช้ uColor แทนรูป Texture
+                    vec3 color = uColor * diffuse + vec3(specular);
+
+                    gl_FragColor = vec4(color, 1.0);
+
+                    #include <tonemapping_fragment>
+                    #include <encodings_fragment>
                   }
+                `,
+                  });
+                }
+                if (child.name.startsWith("PF_Noren_Wind_")) {
+                  child.geometry.computeBoundingBox();
+                  const box = child.geometry.boundingBox;
+
+                  child.material = child.material.clone();
+                  child.material.side = THREE.DoubleSide;
+
+                  const curtainUniforms = {
+                    ...windUniforms,
+                    uTop: { value: box.max.y },
+                    uHeight: { value: box.max.y - box.min.y },
+                    uPhase: {
+                      value: Number(child.name.split("_").pop()) * 0.6,
+                    },
+                  };
+
+                  function applyWind(shader) {
+                    Object.assign(shader.uniforms, curtainUniforms);
+
+                    shader.vertexShader = shader.vertexShader.replace(
+                      "#include <beginnormal_vertex>",
+                      `
+              #include <beginnormal_vertex>
+
+              float h = clamp(
+                (uTop - position.y) / uHeight, 0.0, 1.0
+              );
+              float phase = position.x * 4.0 - uTime * 1.7 + uPhase;
+
+              float slopeX = 4.0 * cos(phase) * uStrength * h * h;
+              float slopeY = -2.0 * sin(phase) * uStrength * h / uHeight;
+
+              objectNormal = normalize(vec3(
+                objectNormal.x - slopeX * objectNormal.z,
+                objectNormal.y - slopeY * objectNormal.z,
+                objectNormal.z
+              ));
+              `,
+                    );
+                    shader.vertexShader =
+                      `
+                  uniform float uTime;
+                  uniform float uStrength;
+                  uniform float uTop;
+                  uniform float uHeight;
+                  uniform float uPhase;
+                ` + shader.vertexShader;
+
+                    shader.vertexShader = shader.vertexShader.replace(
+                      "#include <begin_vertex>",
+                      `
+                  #include <begin_vertex>
+
+                  float weight = clamp(
+                    (uTop - position.y) / uHeight, 0.0, 1.0
+                  );
+
+                  float wave = sin(
+                    position.x * 4.0 - uTime * 1.7 + uPhase
+                  );
+
+                  transformed.z += wave * uStrength * weight * weight;
+                  `,
+                    );
+                  }
+
+                  child.material.onBeforeCompile = applyWind;
+
+                  // ให้เงาขยับตามม่านด้วย
+                  child.customDepthMaterial = new THREE.MeshDepthMaterial({
+                    depthPacking: THREE.RGBADepthPacking,
+                    side: THREE.DoubleSide,
+                  });
+                  child.customDepthMaterial.onBeforeCompile = applyWind;
+
+                  // เผื่อขอบเขตส่วนที่พลิ้วออกจากตำแหน่งเดิม
+                  child.geometry.computeBoundingSphere();
+                  child.geometry.boundingSphere.radius += 0.2;
                 }
               }
             });
@@ -112,6 +317,8 @@
 
             controls.target.set(0, 0, 0);
             controls.update();
+
+            controls.saveState();
           },
           (xhr) => {
             if (xhr.lengthComputable) {
@@ -126,8 +333,47 @@
         );
       });
 
+      const resetButton = document.createElement("Button");
+
+      resetButton.textContent = "Reset มุมกล้อง";
+      resetButton.style.cssText = `
+              position: fixed;
+              bottom: 20px;
+              left: 20px;
+              z-index: 10;
+              padding: 12px 18px;
+              border: none;
+              border-radius: 8px;
+              background: #fff3da;
+              color: #243d35;
+              cursor: pointer;
+              font-size: 16px;
+            `;
+
+      document.body.appendChild(resetButton);
+
+      resetButton.addEventListener("click", () => {
+        picked_object = null;
+        controls.reset();
+      });
+
       function animate() {
         requestAnimationFrame(animate);
+
+        windUniforms.uTime.value = clock.getElapsedTime();
+        if (picked_object !== null) {
+          camera.position.lerp(zoomPosition, 0.05);
+          controls.target.lerp(zoomTarget, 0.05);
+
+          if (
+            camera.position.distanceTo(zoomPosition) < 0.01 &&
+            controls.target.distanceTo(zoomTarget) < 0.01
+          ) {
+            camera.position.copy(zoomPosition);
+            controls.target.copy(zoomTarget);
+            picked_object = null;
+          }
+        }
         controls.update();
         renderer.render(scene, camera);
       }
