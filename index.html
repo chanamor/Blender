@@ -78,6 +78,42 @@
         if (!hit) return;
 
         const name = hit.object.name;
+
+        // คลิกโปสเตอร์บนพื้นหรือกำแพง
+        if (
+          name.startsWith("Poster01") ||
+          name.toLowerCase() === "posterwall"
+        ) {
+          picked_object = hit.object;
+
+          const box = new THREE.Box3().setFromObject(picked_object);
+          box.getCenter(zoomTarget);
+
+          const size = box.getSize(new THREE.Vector3());
+          const halfFov = THREE.MathUtils.degToRad(camera.fov / 2);
+          const halfHorizontalFov = Math.atan(
+            Math.tan(halfFov) * camera.aspect,
+          );
+
+          const distance =
+            (size.length() /
+              2 /
+              Math.sin(Math.min(halfFov, halfHorizontalFov))) *
+            1.2;
+
+          // กำแพง: มองจากด้านข้าง / พื้น: มองจากด้านบน
+          const direction =
+            name.toLowerCase() === "posterwall"
+              ? new THREE.Vector3(1, 0.1, 0)
+              : new THREE.Vector3(0, 1, 0.25);
+
+          zoomPosition
+            .copy(zoomTarget)
+            .add(direction.normalize().multiplyScalar(distance));
+
+          return;
+        }
+
         if (name.startsWith("PF_Profile_")) {
           picked_object = scene.getObjectByName("PF_Profile_Inset");
         } else if (
